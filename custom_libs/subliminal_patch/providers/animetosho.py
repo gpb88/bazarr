@@ -3,6 +3,7 @@ from __future__ import absolute_import
 
 import logging
 import lzma
+from pickle import TRUE
 
 from guessit import guessit
 from requests import Session
@@ -24,6 +25,8 @@ except ImportError:
         import xml.etree.ElementTree as etree
 
 logger = logging.getLogger(__name__)
+
+forced_keywords = ['forced', 'signs']
 
 supported_languages = [
     "ara",  # Arabic
@@ -50,11 +53,15 @@ class AnimeToshoSubtitle(Subtitle):
     """AnimeTosho.org Subtitle."""
     provider_name = 'animetosho'
 
-    def __init__(self, language, download_link, meta, release_info):
+    def __init__(self, language, download_link, meta, release_info, forced=False):
         super(AnimeToshoSubtitle, self).__init__(language, page_link=download_link)
+        language = Language.rebuild(language, forced=forced)
+
+        self.language = language
         self.meta = meta
         self.download_link = download_link
         self.release_info = release_info
+        self.forced = forced
         self.matches = set()
 
     @property
@@ -75,6 +82,7 @@ class AnimeToshoProvider(Provider, ProviderSubtitleArchiveMixin):
     """AnimeTosho.org Provider."""
     subtitle_class = AnimeToshoSubtitle
     languages = {Language('por', 'BR')} | {Language(sl) for sl in supported_languages}
+    languages.update(set(Language.rebuild(lang, forced=True) for lang in languages))
     video_types = Episode
 
     def __init__(self, search_threshold=None):
@@ -94,10 +102,17 @@ class AnimeToshoProvider(Provider, ProviderSubtitleArchiveMixin):
     def list_subtitles(self, video, languages):
         if not video.series_anidb_episode_id:
             logger.debug('Skipping video %r. It is not an anime or the anidb_episode_id could not be identified', video)
-
             return []
 
-        return [s for s in self._get_series(video.series_anidb_episode_id) if s.language in languages]
+        all_subtitles = self._get_series(video.series_anidb_episode_id)
+
+        matched_subtitles = []
+        for language in languages:
+            for subtitle in all_subtitles:
+                if subtitle.language == language:
+                    matched_subtitles.append(subtitle)
+
+        return matched_subtitles
 
     def download_subtitle(self, subtitle):
         logger.info('Downloading subtitle %r', subtitle)
@@ -116,6 +131,21 @@ class AnimeToshoProvider(Provider, ProviderSubtitleArchiveMixin):
     @staticmethod
     def _is_xz_file(content):
         return content.startswith(b'\xFD\x37\x7A\x58\x5A\x00')
+
+    @staticmethod
+    def _is_forced(subtitle_file):
+        if not subtitle_file:
+            return False
+
+        flag_forced = bool(subtitle_file['info'].get('forced', 0))
+        name_forced = False
+
+        name = subtitle_file['info'].get('name', '')
+        for keyword in forced_keywords:
+            if keyword in name.lower():
+                name_forced = True
+
+        return flag_forced or name_forced
 
     def _get_series(self, episode_id):
         storage_download_url = 'https://animetosho.org/storage/attach/'
@@ -154,14 +184,14 @@ class AnimeToshoProvider(Provider, ProviderSubtitleArchiveMixin):
                     if lang.alpha3 == 'por' and subtitle_file['info'].get('name', '').lower().find('brazil'):
                         lang = Language('por', 'BR')
 
+
                     subtitle = self.subtitle_class(
                         lang,
                         storage_download_url + '{}/{}.xz'.format(hex_id, subtitle_file['id']),
                         meta=file,
                         release_info=entry.get('title'),
+                        forced=self._is_forced(subtitle_file),
                     )
-
-                    logger.debug('Found subtitle %r', subtitle)
 
                     subtitles.append(subtitle)
 
